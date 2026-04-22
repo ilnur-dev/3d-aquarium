@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Clownfish Aquarium</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: linear-gradient(180deg, #0a1628 0%, #1a3a5c 100%);
+    font-family: system-ui, sans-serif;
+    color: #cfe8ff;
+  }
+  canvas { display: block; }
+  #hint {
+    position: fixed;
+    left: 12px;
+    bottom: 12px;
+    padding: 8px 12px;
+    background: rgba(10, 22, 40, 0.55);
+    border: 1px solid rgba(179, 229, 252, 0.25);
+    border-radius: 8px;
+    font-size: 12px;
+    letter-spacing: 0.3px;
+    pointer-events: none;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+<div id="hint">Left-drag: rotate · Scroll: zoom · Right-drag: pan</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------- Renderer ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+// ---------- Scene ----------
+const scene = new THREE.Scene();
+
+// Background: animated caustic gradient via a large backing plane behind everything
+{
+  const bgGeo = new THREE.PlaneGeometry(200, 120);
+  const bgMat = new THREE.ShaderMaterial({
+    depthWrite: false,
+    depthTest: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uTime: { value: 0 },
+      uTop:    { value: new THREE.Color('#1a3a5c') },
+      uBottom: { value: new THREE.Color('#0a1628') },
+    },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main(){
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      varying vec2 vUv;
+      uniform float uTime;
+      uniform vec3 uTop;
+      uniform vec3 uBottom;
+
+      // cheap caustic pattern
+      float caustic(vec2 p, float t){
+        float v = 0.0;
+        v += sin(p.x * 3.0 + t * 0.8);
+        v += sin(p.y * 4.0 + t * 1.1);
+        v += sin((p.x + p.y) * 2.5 + t * 1.4);
+        v += sin(length(p - 0.5) * 8.0 - t * 1.2);
+        return v * 0.25;
+      }
+
+      void main(){
+        vec3 base = mix(uBottom, uTop, smoothstep(0.0, 1.0, vUv.y));
+        float c = caustic(vUv * 2.0, uTime);
+        base += vec3(0.03, 0.07, 0.12) * smoothstep(0.2, 1.0, c);
+        gl_FragColor = vec4(base, 1.0);
+      }
+    `
+  });
+  const bg = new THREE.Mesh(bgGeo, bgMat);
+  bg.position.z = -40;
+  bg.renderOrder = -10;
+  scene.add(bg);
+  scene.userData.bgMat = bgMat;
+}
+
+// ---------- Camera & Controls ----------
+const camera = new THREE.PerspectiveCamera(
+  45, window.innerWidth / window.innerHeight, 0.1, 200
+);
+camera.position.set(7, 3.2, 8);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.8, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 4;
+controls.maxDistance = 20;
+controls.maxPolarAngle = Math.PI * 0.52;
+
+// ---------- Tank dimensions ----------
+const TANK = { w: 6, d: 4, h: 3 }; // width (X), depth (Z), height (Y)
+const WATER_MARGIN = 0.08;
+const WATER_H = TANK.h - 0.25; // water height inside tank (leaves small airgap at top)
+const FISH_MARGIN = 0.35;
+
+// Bounds inside which fish can swim (centered on origin, base at y=0)
+const BOUNDS = {
+  xMin: -TANK.w/2 + FISH_MARGIN,
+  xMax:  TANK.w/2 - FISH_MARGIN,
+  zMin: -TANK.d/2 + FISH_MARGIN,
+  zMax:  TANK.d/2 - FISH_MARGIN,
+  yMin:  0.35,
+  yMax:  WATER_H - 0.35
+};
+
+// ---------- Lighting ----------
+const ambient = new THREE.AmbientLight(0xb3e5fc, 0.4);
+scene.add(ambient);
+
+const hemi = new THREE.HemisphereLight(0xcfe8ff, 0x0a1628, 0.35);
+scene.add(hemi);
+
+const dir = new THREE.DirectionalLight(0xfff8e1, 1.0);
+dir.position.set(5, 10, 6);
+dir.castShadow = true;
+dir.shadow.mapSize.set(1024, 1024);
+dir.shadow.camera.near = 0.5;
+dir.shadow.camera.far = 30;
+dir.shadow.camera.left = -6;
+dir.shadow.camera.right = 6;
+dir.shadow.camera.top = 6;
+dir.shadow.camera.bottom = -6;
+dir.shadow.bias = -0.0005;
+scene.add(dir);
+
+const tankLamp = new THREE.PointLight(0xffe0b2, 0.8, 12, 1.8);
+tankLamp.position.set(0, TANK.h - 0.1, 0);
+scene.add(tankLamp);
+
+// ---------- Floor/Table beneath the tank ----------
+{
+  const tableMat = new THREE.MeshStandardMaterial({
+    color: 0x3b2a20, roughness: 0.85, metalness: 0.0
+  });
+  const table = new THREE.Mesh(
+    new THREE.BoxGeometry(TANK.w + 2.5, 0.3, TANK.d + 2.5),
+    tableMat
+  );
+  table.position.y = -0.25;
+  table.receiveShadow = true;
+  scene.add(table);
+}
+
+// ---------- Glass aquarium ----------
+const glassMat = new THREE.MeshPhysicalMaterial({
+  color: 0xe0f7fa,
+  metalness: 0.0,
+  roughness: 0.05,
+  transmission: 0.95,
+  thickness: 0.15,
+  ior: 1.5,
+  transparent: true,
+  opacity: 0.18,
+  clearcoat: 0.4,
+  clearcoatRoughness: 0.05,
+  side: THREE.DoubleSide,
+  envMapIntensity: 1.0
+});
+
+const GLASS_T = 0.06; // glass panel thickness
+
+function addGlassPanel(w, h, d, x, y, z) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), glassMat);
+  mesh.position.set(x, y, z);
+  mesh.renderOrder = 2;
+  scene.add(mesh);
+  return mesh;
+}
+
+// Bottom panel
+addGlassPanel(TANK.w, GLASS_T, TANK.d, 0, -GLASS_T/2, 0);
+// Front wall (+Z)
+addGlassPanel(TANK.w, TANK.h, GLASS_T, 0, TANK.h/2, TANK.d/2 - GLASS_T/2);
+// Back wall (-Z)
+addGlassPanel(TANK.w, TANK.h, GLASS_T, 0, TANK.h/2, -TANK.d/2 + GLASS_T/2);
+// Left wall (-X)
+addGlassPanel(GLASS_T, TANK.h, TANK.d, -TANK.w/2 + GLASS_T/2, TANK.h/2, 0);
+// Right wall (+X)
+addGlassPanel(GLASS_T, TANK.h, TANK.d,  TANK.w/2 - GLASS_T/2, TANK.h/2, 0);
+
+// Wooden/matte black rim along the top
+{
+  const rimMat = new THREE.MeshStandardMaterial({
+    color: 0x1a1a1a, roughness: 0.6, metalness: 0.2
+  });
+  const rimH = 0.12;
+  const rimT = 0.14;
+  const yTop = TANK.h + rimH/2 - 0.02;
+  const parts = [
+    // front/back
+    new THREE.Mesh(new THREE.BoxGeometry(TANK.w + rimT*2, rimH, rimT), rimMat),
+    new THREE.Mesh(new THREE.BoxGeometry(TANK.w + rimT*2, rimH, rimT), rimMat),
+    // left/right
+    new THREE.Mesh(new THREE.BoxGeometry(rimT, rimH, TANK.d), rimMat),
+    new THREE.Mesh(new THREE.BoxGeometry(rimT, rimH, TANK.d), rimMat),
+  ];
+  parts[0].position.set(0, yTop,  TANK.d/2);
+  parts[1].position.set(0, yTop, -TANK.d/2);
+  parts[2].position.set(-TANK.w/2 - rimT/2 + 0.03, yTop, 0);
+  parts[3].position.set( TANK.w/2 + rimT/2 - 0.03, yTop, 0);
+  for (const p of parts) { p.castShadow = true; scene.add(p); }
+}
+
+// ---------- Water volume ----------
+// Body of water (slightly smaller than the tank)
+{
+  const waterMat = new THREE.MeshPhysicalMaterial({
+    color: 0x1e88e5,
+    transparent: true,
+    opacity: 0.18,
+    roughness: 0.15,
+    metalness: 0.0,
+    transmission: 0.4,
+    ior: 1.33,
+    thickness: 1.2,
+    side: THREE.DoubleSide,
+    depthWrite: false
+  });
+  const wBody = new THREE.Mesh(
+    new THREE.BoxGeometry(
+      TANK.w - GLASS_T*2 - WATER_MARGIN,
+      WATER_H - 0.05,
+      TANK.d - GLASS_T*2 - WATER_MARGIN
+    ),
+    waterMat
+  );
+  wBody.position.y = (WATER_H - 0.05) / 2;
+  wBody.renderOrder = 1;
+  scene.add(wBody);
+}
+
+// Animated water surface plane (top)
+const waterSurface = (() => {
+  const w = TANK.w - GLASS_T*2 - WATER_MARGIN - 0.02;
+  const d = TANK.d - GLASS_T*2 - WATER_MARGIN - 0.02;
+  const geo = new THREE.PlaneGeometry(w, d, 48, 32);
+  geo.rotateX(-Math.PI/2);
+  const mat = new THREE.ShaderMaterial({
+    transparent: true,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uTime: { value: 0 },
+      uColor: { value: new THREE.Color('#63c0ff') },
+    },
+    vertexShader: /* glsl */`
+      uniform float uTime;
+      varying vec3 vNormalW;
+      varying vec2 vUv;
+      void main(){
+        vUv = uv;
+        vec3 p = position;
+        float w1 = sin(p.x * 2.0 + uTime * 1.6) * 0.04;
+        float w2 = sin(p.z * 2.5 + uTime * 1.2) * 0.035;
+        float w3 = sin((p.x + p.z) * 1.7 + uTime * 0.9) * 0.025;
+        p.y += w1 + w2 + w3;
+        vNormalW = normalize(normalMatrix * normal);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      varying vec3 vNormalW;
+      varying vec2 vUv;
+      uniform vec3 uColor;
+      uniform float uTime;
+
+      void main(){
+        float f = smoothstep(0.2, 1.0, abs(vNormalW.y));
+        vec3 col = mix(uColor * 0.6, uColor, f);
+        // sheen
+        float sheen = 0.5 + 0.5 * sin(vUv.x * 30.0 + uTime * 2.0)
+                          * sin(vUv.y * 25.0 - uTime * 1.4);
+        col += vec3(0.08, 0.16, 0.22) * sheen * 0.35;
+        gl_FragColor = vec4(col, 0.55);
+      }
+    `
+  });
+  const m = new THREE.Mesh(geo, mat);
+  m.position.y = WATER_H - 0.04;
+  m.renderOrder = 3;
+  scene.add(m);
+  return m;
+})();
+
+// ---------- Gravel floor ----------
+{
+  const gravelColors = [0x8D6E63, 0xA1887F, 0x9E9E9E, 0x6D4C41, 0x795548, 0xBCAAA4];
+  const stoneGroup = new THREE.Group();
+  const N = 120;
+  for (let i = 0; i < N; i++) {
+    const isBig = Math.random() < 0.12;
+    const geo = (Math.random() < 0.5)
+      ? new THREE.DodecahedronGeometry(isBig ? 0.22 + Math.random()*0.18 : 0.05 + Math.random()*0.09, 0)
+      : new THREE.SphereGeometry(isBig ? 0.22 + Math.random()*0.18 : 0.05 + Math.random()*0.09, 8, 6);
+    // squash vertices a little
+    const pos = geo.attributes.position;
+    for (let v = 0; v < pos.count; v++){
+      pos.setY(v, pos.getY(v) * (0.45 + Math.random()*0.25));
+      pos.setX(v, pos.getX(v) * (0.9 + Math.random()*0.2));
+      pos.setZ(v, pos.getZ(v) * (0.9 + Math.random()*0.2));
+    }
+    geo.computeVertexNormals();
+    const mat = new THREE.MeshStandardMaterial({
+      color: gravelColors[(Math.random() * gravelColors.length)|0],
+      roughness: 0.95,
+      metalness: 0.0,
+      flatShading: true
+    });
+    const s = new THREE.Mesh(geo, mat);
+    s.position.set(
+      (Math.random() - 0.5) * (TANK.w - 0.5),
+      0.02 + Math.random() * 0.03,
+      (Math.random() - 0.5) * (TANK.d - 0.5)
+    );
+    s.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
+    s.castShadow = true;
+    s.receiveShadow = true;
+    stoneGroup.add(s);
+  }
+  scene.add(stoneGroup);
+}
+
+// ---------- Plants ----------
+const plants = [];
+function makePlantCluster(cx, cz) {
+  const cluster = new THREE.Group();
+  const nBlades = 5 + Math.floor(Math.random()*4);
+  const colors = [0x2E7D32, 0x388E3C, 0x1B5E20, 0x4CAF50, 0x66BB6A];
+  for (let i = 0; i < nBlades; i++) {
+    const h = 0.9 + Math.random() * 1.3;
+    const w = 0.08 + Math.random() * 0.05;
+
+    // Make a tall blade using a plane with more Y segments for vertex sway
+    const geo = new THREE.PlaneGeometry(w, h, 1, 10);
+    // Shift so base at y=0
+    geo.translate(0, h/2, 0);
+
+    const mat = new THREE.MeshStandardMaterial({
+      color: colors[(Math.random() * colors.length)|0],
+      side: THREE.DoubleSide,
+      roughness: 0.7,
+      metalness: 0.0
+    });
+
+    const blade = new THREE.Mesh(geo, mat);
+    blade.castShadow = true;
+    blade.receiveShadow = true;
+
+    const offX = (Math.random() - 0.5) * 0.6;
+    const offZ = (Math.random() - 0.5) * 0.6;
+    blade.position.set(offX, 0, offZ);
+    blade.rotation.y = Math.random() * Math.PI;
+    blade.userData = {
+      phase: Math.random() * Math.PI * 2,
+      amp: 0.08 + Math.random() * 0.1,
+      freq: 0.6 + Math.random() * 0.6,
+      h: h,
+      basePositions: geo.attributes.position.array.slice(0)
+    };
+    cluster.add(blade);
+  }
+  cluster.position.set(cx, 0, cz);
+  scene.add(cluster);
+  plants.push(cluster);
+}
+
+// Cluster placement: mostly at the back/corners
+makePlantCluster(-TANK.w/2 + 0.8, -TANK.d/2 + 0.7);
+makePlantCluster( TANK.w/2 - 1.0, -TANK.d/2 + 0.8);
+makePlantCluster(-0.6, -TANK.d/2 + 0.6);
+makePlantCluster( 1.6, -TANK.d/2 + 1.2);
+makePlantCluster(-TANK.w/2 + 1.2,  TANK.d/2 - 0.9);
+
+// ---------- Bubbles ----------
+const bubbleMat = new THREE.MeshPhysicalMaterial({
+  color: 0xffffff,
+  metalness: 0.0,
+  roughness: 0.05,
+  transmission: 1.0,
+  thickness: 0.1,
+  ior: 1.33,
+  transparent: true,
+  opacity: 0.5,
+  iridescence: 0.6,
+  iridescenceIOR: 1.3
+});
+const bubbles = [];
+const bubbleSources = [
+  new THREE.Vector3(-1.8, 0.1,  1.2),
+  new THREE.Vector3( 1.6, 0.1, -1.1)
+];
+function spawnBubble(src) {
+  const r = 0.03 + Math.random() * 0.07;
+  const m = new THREE.Mesh(new THREE.SphereGeometry(r, 10, 8), bubbleMat);
+  m.position.copy(src);
+  m.position.x += (Math.random() - 0.5) * 0.15;
+  m.position.z += (Math.random() - 0.5) * 0.15;
+  m.userData = {
+    vy: 0.01 + Math.random() * 0.015,
+    wobbleAmp: 0.003 + Math.random() * 0.006,
+    wobbleFreq: 1.5 + Math.random() * 2.0,
+    phase: Math.random() * Math.PI * 2,
+    startX: m.position.x,
+    startZ: m.position.z,
+    initR: r
+  };
+  scene.add(m);
+  bubbles.push(m);
+}
+
+// ---------- Clownfish ----------
+// Shader for body with three vertical white stripes (black-bordered).
+// "v" parameter = longitudinal position along the body in [0,1] from head (z>0) to tail (z<0).
+const clownBodyVert = /* glsl */`
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying float vT;
+  void main(){
+    vUv = uv;
+    vNormal = normalize(normalMatrix * normal);
+    // Our body is an ellipsoid scaled ~1.6 on Z. Use position.z to derive "along" parameter.
+    // Will be set with uniform body length from JS.
+    vT = position.z; // raw z (pre-scale), mapped in fragment
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+const clownBodyFrag = /* glsl */`
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying float vT;
+  uniform float uZExtent; // half-length of body in local Z (pre-scale)
+
+  vec3 orange = vec3(1.0, 0.427, 0.0);        // #FF6D00
+  vec3 belly  = vec3(1.0, 0.58, 0.27);
+  vec3 white  = vec3(0.98, 0.98, 0.98);
+  vec3 black  = vec3(0.05, 0.05, 0.05);
+
+  // stripe at center "c" with white width "ww" and black border width "bw"
+  // returns 0..2 weights: x = white, y = black
+  vec2 stripe(float t, float c, float ww, float bw){
+    float d = abs(t - c);
+    float w = smoothstep(ww + bw, ww, d);         // 1 inside white zone
+    float b = smoothstep(ww + bw + 0.005, ww + bw, d) - w; // just black border ring
+    return vec2(w, max(b, 0.0));
+  }
+
+  void main(){
+    // Normalize longitudinal: 0 = tail, 1 = head
+    float t = clamp((vT / uZExtent) * 0.5 + 0.5, 0.0, 1.0);
+
+    vec3 col = mix(belly, orange, smoothstep(0.35, 0.75, vNormal.y * 0.5 + 0.5));
+
+    // Three vertical stripes: head, mid, near-tail
+    vec2 s1 = stripe(t, 0.78, 0.045, 0.018);
+    vec2 s2 = stripe(t, 0.45, 0.055, 0.018);
+    vec2 s3 = stripe(t, 0.14, 0.040, 0.015);
+
+    float wTot = min(1.0, s1.x + s2.x + s3.x);
+    float bTot = min(1.0, s1.y + s2.y + s3.y);
+
+    col = mix(col, white, wTot);
+    col = mix(col, black, bTot);
+
+    // soft rim light for "alive" look
+    float rim = pow(1.0 - max(0.0, vNormal.z), 2.0);
+    col += vec3(0.08, 0.05, 0.02) * rim;
+
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
+// Shared fin materials (opaque so they read against water)
+const finMat = new THREE.MeshStandardMaterial({
+  color: 0xFF6D00,
+  roughness: 0.55,
+  metalness: 0.0,
+  side: THREE.DoubleSide,
+  emissive: 0x1a0600,
+  emissiveIntensity: 0.25
+});
+const finEdgeMat = new THREE.MeshStandardMaterial({
+  color: 0x111111,
+  roughness: 0.65,
+  side: THREE.DoubleSide
+});
+
+const FIN_EXTRUDE = { depth: 0.02, bevelEnabled: false, curveSegments: 12 };
+const FIN_EDGE_EXTRUDE = { depth: 0.025, bevelEnabled: false, curveSegments: 12 };
+
+function makeClownfish(scale = 1.0) {
+  const fish = new THREE.Group();
+  fish.rotation.order = 'YXZ';
+  fish.userData.scale = scale;
+
+  // ----- Body -----
+  // Head is at local +Z, tail at local -Z.
+  const bodyGeo = new THREE.SphereGeometry(0.5, 40, 28);
+  bodyGeo.scale(0.55, 0.7, 1.6);
+  const zExtent = 0.5 * 1.6;
+
+  const bodyMat = new THREE.ShaderMaterial({
+    vertexShader: clownBodyVert,
+    fragmentShader: clownBodyFrag,
+    uniforms: { uZExtent: { value: zExtent } },
+  });
+
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  body.castShadow = true;
+  fish.add(body);
+
+  // ----- Tail (caudal fin) -----
+  // Build shape in 2D (XY plane): shape-X = "backward distance" (>=0), shape-Y = vertical.
+  // ExtrudeGeometry gives a thin slab along +Z. Then rotateY so the slab sits in YZ world plane.
+  function makeTailGeo(size, depth) {
+    const s = new THREE.Shape();
+    s.moveTo(0, 0);
+    s.lineTo(size * 0.15, size * 0.05);
+    s.lineTo(size * 0.55, size * 0.55);
+    s.lineTo(size * 0.38, size * 0.10);
+    s.lineTo(size * 0.55, size * -0.55);
+    s.lineTo(size * 0.15, size * -0.05);
+    s.lineTo(0, 0);
+    const g = new THREE.ExtrudeGeometry(s, { ...FIN_EXTRUDE, depth });
+    g.translate(0, 0, -depth / 2);   // center slab on its plane
+    g.rotateY(Math.PI / 2);           // shape +X -> world -Z (behind the fish)
+    return g;
+  }
+  const tailPivot = new THREE.Group();
+  tailPivot.position.set(0, 0, -zExtent - 0.01);
+  fish.add(tailPivot);
+
+  const tail = new THREE.Mesh(makeTailGeo(1.0, FIN_EXTRUDE.depth), finMat);
+  tail.castShadow = true;
+  tailPivot.add(tail);
+
+  // ----- Dorsal fin (sail along top of back) -----
+  // Shape-X along spine (maps to world -Z after rotateY(-PI/2)), shape-Y = height (stays +Y).
+  {
+    const s = new THREE.Shape();
+    s.moveTo(-0.55, 0);
+    s.quadraticCurveTo(-0.2, 0.42, 0.0, 0.45);
+    s.quadraticCurveTo(0.3, 0.35, 0.55, 0.0);
+    s.lineTo(-0.55, 0);
+    const depth = FIN_EXTRUDE.depth;
+    const g = new THREE.ExtrudeGeometry(s, { ...FIN_EXTRUDE, depth });
+    g.translate(0, 0, -depth / 2);
+    g.rotateY(Math.PI / 2); // shape -X (forward end) -> world +Z (head side)
+    const dorsal = new THREE.Mesh(g, finMat);
+    dorsal.castShadow = true;
+    dorsal.position.set(0, 0.32, -0.1);
+    fish.add(dorsal);
+    fish.userData.dorsal = dorsal;
+  }
+
+  // ----- Anal fin (underside near tail) -----
+  {
+    const s = new THREE.Shape();
+    s.moveTo(-0.18, 0);
+    s.quadraticCurveTo(0.0, -0.3, 0.28, -0.02);
+    s.lineTo(0.28, 0);
+    s.lineTo(-0.18, 0);
+    const depth = FIN_EXTRUDE.depth;
+    const g = new THREE.ExtrudeGeometry(s, { ...FIN_EXTRUDE, depth });
+    g.translate(0, 0, -depth / 2);
+    g.rotateY(Math.PI / 2);
+    const anal = new THREE.Mesh(g, finMat);
+    anal.castShadow = true;
+    anal.position.set(0, -0.28, -0.32);
+    fish.add(anal);
+    fish.userData.anal = anal;
+  }
+
+  // ----- Pectoral fins (×2): side fins, roughly horizontal -----
+  // Shape-X = outward from body, shape-Y = along body (backward positive).
+  // ExtrudeGeometry adds depth along +Z. Rotate around X by -PI/2: shape-Y (+Y) -> world -Z (backward),
+  // shape-X stays world X, shape-Z (thickness) -> world -Y (slight vertical thickness).
+  function makePecGeo(sideSign) {
+    const s = new THREE.Shape();
+    s.moveTo(0, 0);
+    s.quadraticCurveTo(sideSign * 0.22, 0.05, sideSign * 0.38, 0.22);
+    s.quadraticCurveTo(sideSign * 0.18, 0.08, 0, 0);
+    const depth = FIN_EXTRUDE.depth;
+    const g = new THREE.ExtrudeGeometry(s, { ...FIN_EXTRUDE, depth });
+    g.translate(0, 0, -depth / 2);
+    g.rotateX(-Math.PI / 2);
+    return g;
+  }
+  const pecR = new THREE.Mesh(makePecGeo(+1), finMat);
+  pecR.castShadow = true;
+  pecR.position.set(0.22, -0.02, 0.1);
+  pecR.rotation.z = -Math.PI * 0.10;
+  fish.add(pecR);
+  const pecL = new THREE.Mesh(makePecGeo(-1), finMat);
+  pecL.castShadow = true;
+  pecL.position.set(-0.22, -0.02, 0.1);
+  pecL.rotation.z =  Math.PI * 0.10;
+  fish.add(pecL);
+
+  // ----- Eyes -----
+  const eyeWhiteMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 0.3, metalness: 0.1
+  });
+  const pupilMat = new THREE.MeshStandardMaterial({
+    color: 0x0a0a0a, roughness: 0.25, metalness: 0.3
+  });
+  const shineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+  function addEye(side) {
+    const g = new THREE.Group();
+    const w = new THREE.Mesh(new THREE.SphereGeometry(0.09, 16, 12), eyeWhiteMat);
+    const p = new THREE.Mesh(new THREE.SphereGeometry(0.055, 14, 10), pupilMat);
+    p.position.set(side * 0.02, 0, 0.04);
+    const s = new THREE.Mesh(new THREE.SphereGeometry(0.017, 8, 6), shineMat);
+    s.position.set(side * 0.035, 0.025, 0.07);
+    g.add(w); g.add(p); g.add(s);
+    g.position.set(side * 0.19, 0.05, 0.5);
+    // Tilt eyes outward
+    g.rotation.y = side * 0.55;
+    fish.add(g);
+  }
+  addEye(-1);
+  addEye( 1);
+
+  // ----- Mouth (small indentation/ring) -----
+  const mouthMat = new THREE.MeshStandardMaterial({
+    color: 0x3a0d00, roughness: 0.9
+  });
+  const mouth = new THREE.Mesh(
+    new THREE.SphereGeometry(0.05, 10, 8),
+    mouthMat
+  );
+  mouth.scale.set(1, 0.45, 0.5);
+  mouth.position.set(0, -0.08, 0.75);
+  fish.add(mouth);
+
+  // Scale whole fish
+  fish.scale.setScalar(scale);
+
+  // Userdata for AI + animation
+  fish.userData = {
+    ...fish.userData,
+    tailPivot,
+    pecL, pecR,
+    target: randomPointInBounds(),
+    speed: 0.018 + Math.random() * 0.012,   // world-units per second along forward axis
+    phase: Math.random() * Math.PI * 2,
+  };
+
+  return fish;
+}
+
+function randomPointInBounds() {
+  return new THREE.Vector3(
+    THREE.MathUtils.lerp(BOUNDS.xMin, BOUNDS.xMax, Math.random()),
+    THREE.MathUtils.lerp(BOUNDS.yMin, BOUNDS.yMax, Math.random()),
+    THREE.MathUtils.lerp(BOUNDS.zMin, BOUNDS.zMax, Math.random())
+  );
+}
+
+// Three fish with varied sizes
+const fishes = [];
+const scales = [0.9, 1.0, 1.1];
+for (let i = 0; i < 3; i++) {
+  const f = makeClownfish(scales[i]);
+  f.position.set(
+    (Math.random() - 0.5) * (TANK.w - 1.5),
+    1 + Math.random() * (WATER_H - 1.6),
+    (Math.random() - 0.5) * (TANK.d - 1.5)
+  );
+  // Face the initial target so we don't start pointed at a wall
+  const t0 = f.userData.target;
+  const dx0 = t0.x - f.position.x;
+  const dz0 = t0.z - f.position.z;
+  f.rotation.y = Math.atan2(dx0, dz0);
+  fishes.push(f);
+  scene.add(f);
+}
+
+// ---------- Animation loop ----------
+const clock = new THREE.Clock();
+let bubbleTimers = bubbleSources.map(() => 0);
+
+function updateFish(f, dt, t) {
+  const u = f.userData;
+
+  // Pick a new waypoint when close enough
+  const toTarget = new THREE.Vector3().subVectors(u.target, f.position);
+  if (toTarget.length() < 0.45) {
+    u.target = randomPointInBounds();
+    toTarget.subVectors(u.target, f.position);
+  }
+
+  // Avoid walls: if very close to a boundary, steer the target inward
+  const pushMargin = 0.15;
+  if (f.position.x > BOUNDS.xMax - pushMargin) toTarget.x = Math.min(toTarget.x, -0.2);
+  if (f.position.x < BOUNDS.xMin + pushMargin) toTarget.x = Math.max(toTarget.x,  0.2);
+  if (f.position.z > BOUNDS.zMax - pushMargin) toTarget.z = Math.min(toTarget.z, -0.2);
+  if (f.position.z < BOUNDS.zMin + pushMargin) toTarget.z = Math.max(toTarget.z,  0.2);
+  if (f.position.y > BOUNDS.yMax - pushMargin) toTarget.y = Math.min(toTarget.y, -0.2);
+  if (f.position.y < BOUNDS.yMin + pushMargin) toTarget.y = Math.max(toTarget.y,  0.2);
+
+  const dir = toTarget.clone().normalize();
+
+  // --- Orientation: YXZ Euler; head is at local +Z ---
+  // For direction d normalized:
+  //   yaw   = atan2(dx, dz)
+  //   pitch = -asin(dy)   (with YXZ; negative -> head-up when dy>0)
+  const desiredYaw = Math.atan2(dir.x, dir.z);
+  const desiredPitch = -Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1)) * 0.55; // damp
+
+  // Smooth yaw (shortest arc)
+  let yawDiff = desiredYaw - f.rotation.y;
+  while (yawDiff >  Math.PI) yawDiff -= Math.PI * 2;
+  while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+  const yawK = 1 - Math.exp(-dt * 3.0);
+  f.rotation.y += yawDiff * yawK;
+
+  // Smooth pitch
+  const pitchK = 1 - Math.exp(-dt * 2.5);
+  f.rotation.x += (desiredPitch - f.rotation.x) * pitchK;
+
+  // Bank (roll) into turns
+  const desiredRoll = THREE.MathUtils.clamp(-yawDiff * 1.1, -0.4, 0.4);
+  const rollK = 1 - Math.exp(-dt * 3.5);
+  f.rotation.z += (desiredRoll - f.rotation.z) * rollK;
+
+  // --- Forward movement along local +Z (head direction) ---
+  const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(f.quaternion);
+  const speedScale = 1.0 - Math.min(0.55, Math.abs(yawDiff) * 0.35);
+  f.position.addScaledVector(forward, u.speed * speedScale * dt * 60);
+
+  // Safety clamp
+  f.position.x = THREE.MathUtils.clamp(f.position.x, BOUNDS.xMin, BOUNDS.xMax);
+  f.position.y = THREE.MathUtils.clamp(f.position.y, BOUNDS.yMin, BOUNDS.yMax);
+  f.position.z = THREE.MathUtils.clamp(f.position.z, BOUNDS.zMin, BOUNDS.zMax);
+
+  // --- Animated fins ---
+  // Tail wag around Y (left-right from above), freq scales with speed
+  const wagFreq = 5.0 + (u.speed / 0.03) * 6.0;
+  u.tailPivot.rotation.y = Math.sin(t * wagFreq + u.phase) * 0.45;
+
+  // Dorsal subtle sway around Y
+  if (u.dorsal) u.dorsal.rotation.y = Math.sin(t * 1.8 + u.phase) * 0.07;
+  // Anal fin subtle sway
+  if (u.anal)   u.anal.rotation.y   = Math.sin(t * 2.1 + u.phase + 1.0) * 0.07;
+
+  // Pectoral fins flapping around Z (axis pointing forward): tilts them up/down
+  const flap = Math.sin(t * 5.0 + u.phase) * 0.45;
+  u.pecR.rotation.z = -flap;
+  u.pecL.rotation.z =  flap;
+}
+
+function updatePlants(t) {
+  for (const cluster of plants) {
+    for (const blade of cluster.children) {
+      const ud = blade.userData;
+      const posAttr = blade.geometry.attributes.position;
+      const base = ud.basePositions;
+      for (let i = 0; i < posAttr.count; i++) {
+        const bx = base[i*3 + 0];
+        const by = base[i*3 + 1];
+        const bz = base[i*3 + 2];
+        // Only sway based on height; tip moves most
+        const k = Math.min(1.0, by / ud.h);
+        const bend = Math.sin(t * ud.freq + ud.phase) * ud.amp * k * k;
+        posAttr.setX(i, bx + bend);
+        posAttr.setZ(i, bz + bend * 0.3);
+      }
+      posAttr.needsUpdate = true;
+    }
+  }
+}
+
+function updateBubbles(dt, t) {
+  // spawn
+  for (let i = 0; i < bubbleSources.length; i++) {
+    bubbleTimers[i] -= dt;
+    if (bubbleTimers[i] <= 0) {
+      spawnBubble(bubbleSources[i]);
+      bubbleTimers[i] = 0.25 + Math.random() * 0.3; // ~3/s
+    }
+  }
+  // update + cull
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const b = bubbles[i];
+    const ud = b.userData;
+    b.position.y += ud.vy * dt * 60;
+    b.position.x = ud.startX + Math.sin(t * ud.wobbleFreq + ud.phase) * 0.08;
+    b.position.z = ud.startZ + Math.cos(t * ud.wobbleFreq * 0.8 + ud.phase) * 0.08;
+
+    // Shrink as approaching surface
+    const p = THREE.MathUtils.clamp(b.position.y / (WATER_H - 0.1), 0, 1);
+    const s = THREE.MathUtils.lerp(1.0, 0.6, p);
+    b.scale.setScalar(s);
+
+    if (b.position.y >= WATER_H - 0.12) {
+      scene.remove(b);
+      b.geometry.dispose();
+      bubbles.splice(i, 1);
+    }
+  }
+}
+
+function animate() {
+  const dt = Math.min(clock.getDelta(), 1/30);
+  const t = clock.elapsedTime;
+
+  // Update uniforms
+  scene.userData.bgMat.uniforms.uTime.value = t;
+  waterSurface.material.uniforms.uTime.value = t;
+
+  // Keep background facing camera
+  const bg = scene.children.find(c => c.material === scene.userData.bgMat);
+  if (bg) {
+    bg.position.copy(camera.position);
+    bg.position.addScaledVector(camera.getWorldDirection(new THREE.Vector3()), -40);
+    bg.lookAt(camera.position);
+  }
+
+  for (const f of fishes) updateFish(f, dt, t);
+  updatePlants(t);
+  updateBubbles(dt, t);
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+animate();
+
+// ---------- Resize ----------
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
